@@ -2,24 +2,75 @@ name: Build APK
 
 on:
   push:
-    branches: [ main, master ]
+  pull_request:
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+
+      # Cari folder proyek otomatis (jaga-jaga kalau ter-upload di dalam subfolder)
+      - name: Cari folder proyek
+        id: proj
+        shell: bash
+        run: |
+          f=$(find . -maxdepth 3 -name settings.gradle.kts | head -n 1)
+          if [ -z "$f" ]; then
+            echo "settings.gradle.kts tidak ditemukan. Isi repo:"
+            find . -maxdepth 3 -not -path './.git/*' | head -60
+            exit 1
+          fi
+          echo "dir=$(dirname "$f")" >> "$GITHUB_OUTPUT"
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
+
+      - uses: android-actions/setup-android@v3
+
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.9
+
       - name: Build debug APK
-        run: gradle assembleDebug --stacktrace
-      - uses: actions/upload-artifact@v4
+        shell: bash
+        working-directory: ${{ steps.proj.outputs.dir }}
+        run: |
+          set -o pipefail
+          gradle assembleDebug --stacktrace --no-daemon 2>&1 | tee build.log
+
+      - name: Ringkasan error
+        if: failure()
+        shell: bash
+        working-directory: ${{ steps.proj.outputs.dir }}
+        run: |
+          {
+            echo '### Error build'
+            echo '```'
+            if [ -f build.log ]; then
+              grep -E -A6 '^e: |What went wrong|FAILURE' build.log | head -80 \
+                || echo "(tidak ada pola error yang cocok, lihat artifact build-log)"
+            else
+              echo "build.log tidak ada: kegagalan terjadi SEBELUM step build (cek step di atasnya)."
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Simpan log build
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: ${{ steps.proj.outputs.dir }}/build.log
+          if-no-files-found: ignore
+
+      - name: Simpan APK
+        uses: actions/upload-artifact@v4
         with:
           name: StokGudang-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: ${{ steps.proj.outputs.dir }}/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
